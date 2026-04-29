@@ -177,8 +177,16 @@ def resample_to_isotropic(
 
     # 使用 nilearn 的 resample_to_img（依赖 scipy/numpy）
     from nilearn.image import resample_to_img
+
+    # 转换数据类型为float32以避免警告
+    img_float32 = nib.Nifti1Image(
+        img.get_fdata(dtype=np.float32),
+        img.affine,
+        header=img.header
+    )
+
     resampled = resample_to_img(
-        source_img=img,
+        source_img=img_float32,
         target_img=ref_img,
         interpolation='continuous' if order > 0 else 'nearest'
     )
@@ -505,7 +513,7 @@ def random_rotation_3d(
     from scipy.ndimage import rotate
 
     angle = np.random.uniform(-max_angle, max_angle)
-    plane = np.random.choice([(1, 2), (0, 2)])   # 选择旋转平面
+    plane = [(1, 2), (0, 2)][np.random.randint(0, 2)]   # 选择旋转平面
 
     vol_rot = rotate(
         volume, angle,
@@ -540,9 +548,9 @@ def elastic_deformation_3d(
     Parameters
     ----------
     volume : np.ndarray
-        3D MRI 体数据。
+        3D MRI 体数据，shape = (C, D, H, W)。
     seg : np.ndarray
-        3D 分割标注。
+        3D 分割标注，shape = (D, H, W)。
     alpha : float
         形变幅度系数，控制最大位移量（体素单位），默认 30.0。
     sigma : float
@@ -563,7 +571,7 @@ def elastic_deformation_3d(
 
     shape = volume.shape[1:]  # (D, H, W)
 
-    # 生成独立随机位移场
+    # 生成独立随机位移场（每个位移场都是3D数组）
     displacements = [
         gaussian_filter(
             np.random.randn(*shape) * alpha, sigma=sigma, mode="constant", cval=0
@@ -571,12 +579,21 @@ def elastic_deformation_3d(
         for _ in range(3)
     ]
 
-    # 构建变形后坐标网格
+    # 构建原始坐标网格
+    d, h, w = np.meshgrid(
+        np.arange(shape[0]),
+        np.arange(shape[1]),
+        np.arange(shape[2]),
+        indexing='ij'
+    )
+
+    # 在原始坐标上添加位移场
     coords = [
-        np.arange(s) + disp
-        for s, disp in zip(shape, displacements)
+        d + displacements[0],
+        h + displacements[1],
+        w + displacements[2]
     ]
-    grid = np.array(np.meshgrid(*coords, indexing='ij'))
+    grid = np.array(coords)
 
     vol_out = np.zeros_like(volume)
     seg_out = np.zeros_like(seg)
@@ -585,10 +602,11 @@ def elastic_deformation_3d(
         vol_out[c] = map_coordinates(
             volume[c], grid, order=3, mode='constant', cval=0
         )
-    for c in range(seg.shape[0]):
-        seg_out[c] = np.round(
-            map_coordinates(seg[c], grid, order=0, mode='constant', cval=0)
-        ).astype(np.int32)
+
+    # seg 是3D的，不需要循环通道维度
+    seg_out = np.round(
+        map_coordinates(seg, grid, order=0, mode='constant', cval=0)
+    ).astype(np.int32)
 
     return vol_out, seg_out
 
@@ -909,7 +927,13 @@ def print_dataloader_info(loaders: Dict[str, DataLoader]):
         print(f"    Dataset size    : {len(ds)} patients")
         print(f"    Batch size      : {loader.batch_size}")
         print(f"    Batches per ep. : {len(loader)}")
-        print(f"    Shuffle         : {loader.shuffle}")
+        # 判断是否 shuffle：检查 batch_sampler 中的 sampler 类型
+        try:
+            sampler = loader.batch_sampler.sampler
+            is_shuffle = isinstance(sampler, torch.utils.data.RandomSampler)
+        except Exception:
+            is_shuffle = False
+        print(f"    Shuffle         : {is_shuffle}")
         print(f"    Num workers     : {loader.num_workers}")
         print(f"    Augmentation    : {'Yes' if ds.augment else 'No'}")
         print(f"    Target spacing  : {ds.target_spacing} mm")
@@ -927,30 +951,29 @@ def print_dataloader_info(loaders: Dict[str, DataLoader]):
 # 使用示例（不运行，仅展示调用方式）
 # ============================================================================
 #
-# # 方式一：直接构建 DataLoader
-# loaders = build_dataloaders(batch_size=2, target_spacing=1.0)
-#
-# # 打印详细信息
-# print_dataloader_info(loaders)
-#
-# # 打印各类别权重
-# weights = get_class_weights(loaders['train'])
-# print(f"Class weights: {weights}")
-#
-# # 方式二：独立使用 Dataset
-# train_dataset = BrainMRIDataset(split='train', augment=True)
-# val_dataset   = BrainMRIDataset(split='val',   augment=False)
-# test_dataset  = BrainMRIDataset(split='test',  augment=False)
-#
-# # 打印数据集统计摘要
-# train_dataset.print_summary()
-# val_dataset.print_summary()
-# test_dataset.print_summary()
-#
-# # 遍历 DataLoader
+
+# === 方式一：构建 DataLoader（推荐） ===
+
+loaders = build_dataloaders(batch_size=2, target_spacing=1.0, num_workers=0)
+print_dataloader_info(loaders)
+
+weights = get_class_weights(loaders['train'])
+print(f"Class weights: {weights}")
+
+# === 方式二：直接使用 Dataset ===
+
+# train_ds = BrainMRIDataset(split='train', augment=True)
+# val_ds   = BrainMRIDataset(split='val',   augment=False)
+# test_ds  = BrainMRIDataset(split='test',  augment=False)
+
+# train_ds.print_summary()
+# val_ds.print_summary()
+# test_ds.print_summary()
+
+# === 遍历 DataLoader ===
+
 # for batch_idx, (volume, seg, info) in enumerate(loaders['train']):
 #     print(f"Batch {batch_idx}: volume={volume.shape}, seg={seg.shape}")
 #     # volume: (B, 4, D, H, W)
 #     # seg   : (B, D, H, W)
-#     # info  : List[Dict]，每条含 patient_id / split / shape 等
-#
+#     # info  : List[Dict] — 每条含 patient_id / split / shape / unique_labels 等
