@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
                              default=4,
                              help="输入通道数 (MRI 模态数)")
     group_model.add_argument("--base_filters", type=int,
-                             default=32,
+                             default=64,
                              help="U-Net / nnU-Net 基础滤波器数")
     group_model.add_argument("--attention_gate_channels", type=int,
                              default=128,
@@ -80,13 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
     # ── 训练相关 ──────────────────────────────────────────────
     group_train = parser.add_argument_group("Training")
     group_train.add_argument("--epochs", type=int,
-                             default=150,
+                             default=200,
                              help="训练轮数")
     group_train.add_argument("--batch_size", type=int,
                              default=1,
                              help="训练批大小")
     group_train.add_argument("--lr", type=float,
-                             default=1e-3,
+                             default=1e-4,
                              help="初始学习率")
     group_train.add_argument("--weight_decay", type=float,
                              default=1e-4,
@@ -99,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
                              default=30,
                              help="StepLR 步长 (仅 step 调度器)")
     group_train.add_argument("--step_lr_gamma", type=float,
-                             default=0.1,
+                             default=0.5,
                              help="StepLR 衰减系数 (仅 step 调度器)")
     group_train.add_argument("--loss_fn", type=str,
                              default="dice_ce",
@@ -109,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
                              default=2.0,
                              help="Focal Loss gamma 参数")
     group_train.add_argument("--dice_smooth", type=float,
-                             default=1.0,
+                             default=0.5,
                              help="Dice Loss 平滑项")
     group_train.add_argument("--num_workers", type=int,
                              default=4,
@@ -121,13 +121,19 @@ def build_parser() -> argparse.ArgumentParser:
                              default=2,
                              help="DataLoader prefetch_factor")
 
+    group_train.add_argument("--grad_accum_steps", type=int,
+                             default=4,
+                             help="gradient accumulation steps (effective bs = bs x accum)")
+    group_train.add_argument("--effective_lr", type=float,
+                             default=5e-5,
+                             help="actual learning rate (default 5e-5, more stable than 1e-4)")
     # ── 3D patch 训练 ────────────────────────────────────────
     group_patch = parser.add_argument_group("3D Patch")
     group_patch.add_argument("--patch_size", type=int, nargs=3,
                              default=[96, 96, 96],
                              help="3D 训练 patch 大小 (D H W)")
     group_patch.add_argument("--patch_overlap", type=float,
-                             default=0.25,
+                             default=0.5,
                              help="滑窗推理重叠比例 (0~0.5)")
     group_patch.add_argument("--random_patch", type=int,
                              default=1, choices=[0, 1],

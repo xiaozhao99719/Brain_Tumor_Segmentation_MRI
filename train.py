@@ -1,13 +1,20 @@
 """
-train.py — BrainMRI 模型训练与验证
-====================================
+train.py — BrainMRI 模型训练与验证 (优化版)
+==========================================
 完整训练流程:
   - 支持 nnU-Net / Attention U-Net / TransUNet
   - 3D 随机 patch 裁剪训练 (适配大体积)
-  - 损失函数: Dice+CE / Dice / CE / Focal
+  - 损失函数: Dice+CE / Dice / CE / Focal（含 Label Smoothing）
   - 评估指标: Dice / IoU / Sensitivity (per-class + mean)
   - 每 epoch 打印训练 loss 和验证指标
   - AMP 混合精度支持
+
+优化点:
+  1. 梯度累积 (virtual batch_size=4) — 减少梯度噪声
+  2. 梯度裁剪 (max_norm=1.0) — 防止 loss 尖峰
+  3. EMA 权重滑动平均 (decay=0.999) — 训练更稳定，验证指标更平滑
+  4. Label Smoothing (smoothing=0.1) — 提升泛化能力
+  5. 学习率微调 (1e-4→5e-5) — 减少训练震荡
 """
 
 from __future__ import annotations
@@ -78,7 +85,8 @@ def build_loss_fn(args) -> nn.Module:
     elif args.loss_fn == "dice":
         return DiceLoss(nc, args.dice_smooth)
     elif args.loss_fn == "ce":
-        return nn.CrossEntropyLoss()
+        # ★ 改动: 添加 Label Smoothing (smoothing=0.1)
+        return nn.CrossEntropyLoss(label_smoothing=0.1)
     elif args.loss_fn == "focal":
         return FocalLoss(nc, args.focal_gamma)
     else:
@@ -86,15 +94,70 @@ def build_loss_fn(args) -> nn.Module:
 
 
 class _DiceCELoss(nn.Module):
-    """Dice + CE 联合损失。"""
+    """Dice + CE 联合损失（带 Label Smoothing）。"""
 
     def __init__(self, num_classes: int, smooth: float = 1.0):
         super().__init__()
         self.dice = DiceLoss(num_classes, smooth)
-        self.ce = nn.CrossEntropyLoss()
+        # ★ 改动: CE 损失加 Label Smoothing，防止过拟合
+        self.ce = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     def forward(self, pred, target):
         return self.dice(pred, target) + self.ce(pred, target)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  EMA (Exponential Moving Average) — 新增
+# ═══════════════════════════════════════════════════════════════
+
+
+class ModelEMA:
+    """
+    指数滑动平均权重更新。
+
+    训练时维护一个 shadow model，在验证/保存时用 shadow weights，
+    等效于对训练过程做低通滤波，大幅提升稳定性和泛化能力。
+
+    使用方式:
+        ema = ModelEMA(model, decay=0.999)
+        # 每次 forward 后:
+        ema.update()
+        # 验证时切换到 shadow weights:
+        ema.apply_shadow()
+        evaluate(model)
+        ema.restore()
+    """
+
+    def __init__(self, model: nn.Module, decay: float = 0.999, device=None):
+        self.decay = decay
+        self.model = model
+        self.shadow = {}
+        self.backup = {}
+        self._register()
+
+    def _register(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone().detach()
+
+    def update(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow, f"EMA: parameter '{name}' not found"
+                new_avg = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_avg.clone()
+
+    def apply_shadow(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name].clone()
+
+    def restore(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name].clone()
+        self.backup.clear()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -230,14 +293,26 @@ def train_one_epoch(
     epoch: int,
     args,
     scaler: GradScaler = None,
+    ema: ModelEMA = None,
 ) -> float:
-    """训练一个 epoch, 返回平均 loss。"""
+    """
+    训练一个 epoch, 返回平均 loss。
+
+    ★ 优化:
+      - 梯度累积 (accumulation_steps=4): 等效 batch_size=4
+      - 梯度裁剪 (max_norm=1.0): 防止大梯度炸训练
+      - EMA 权重更新: 保持 shadow weights 同步
+    """
     model.train()
     total_loss = 0.0
     n_batches = 0
 
     patch_size = tuple(args.patch_size)
     use_amp = args.amp == 1
+
+    # ★ 梯度累积步数: 等效 batch_size = batch_size * accum
+    accum_steps = getattr(args, 'grad_accum_steps', 4)
+    grad_scale = 1.0 / accum_steps  # 缩放 loss 以补偿梯度累积
 
     for batch_idx, (volume, seg, info) in enumerate(dataloader):
         # volume: (B, 4, D, H, W), seg: (B, D, H, W)
@@ -267,27 +342,46 @@ def train_one_epoch(
             volume = torch.stack(patches_v)
             seg = torch.stack(patches_s)
 
-        optimizer.zero_grad(set_to_none=True)
+        # ★ 梯度累积: 只在每个 accum 循环开始时清零
+        if batch_idx % accum_steps == 0:
+            optimizer.zero_grad(set_to_none=True)
 
+        # ★ 前向传播（loss 乘以 grad_scale 用于补偿）
         if use_amp and scaler is not None:
             with autocast('cuda'):
                 pred = model(volume)
-                loss = loss_fn(pred, seg)
+                loss = loss_fn(pred, seg) * grad_scale
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
         else:
             pred = model(volume)
-            loss = loss_fn(pred, seg)
+            loss = loss_fn(pred, seg) * grad_scale
             loss.backward()
-            optimizer.step()
 
-        total_loss += loss.item()
+        # ★ 梯度累积: 每 accum_steps 步才执行一次 optimizer.step
+        if (batch_idx + 1) % accum_steps == 0:
+            # ★ 梯度裁剪 (max_norm=1.0)
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
+            optimizer.zero_grad(set_to_none=True)
+
+            # ★ EMA 权重更新 (decay=0.999)
+            if ema is not None:
+                ema.update()
+
+        total_loss += loss.item() * accum_steps  # 还原为原始 scale
         n_batches += 1
 
         if (batch_idx + 1) % args.log_every == 0:
             print(f"  [Epoch {epoch}] Batch {batch_idx+1}/{len(dataloader)}  "
-                  f"Loss: {loss.item():.5f}")
+                  f"Loss: {loss.item()*accum_steps:.5f}")
 
     avg_loss = total_loss / max(n_batches, 1)
     return avg_loss
@@ -305,16 +399,23 @@ def validate(
     loss_fn: nn.Module,
     device: str,
     args,
+    ema: ModelEMA = None,
+    use_ema: bool = True,
 ) -> Tuple[float, Dict[str, float]]:
     """
     在验证集上评估, 返回 (avg_loss, metrics_dict)。
-    采用滑窗推理 + 重叠融合以处理大体积。
+
+    ★ 优化: 默认使用 EMA shadow weights 进行推理，
+      保存的模型和验证指标都会更稳定。
     """
     model.eval()
+
+    # ★ 切换到 EMA 权重做验证/推理
+    if ema is not None and use_ema:
+        ema.apply_shadow()
+
     total_loss = 0.0
     n_batches = 0
-
-    # 累计指标
     all_metrics = {}
 
     patch_size = tuple(args.patch_size)
@@ -347,10 +448,12 @@ def validate(
                 all_metrics[k] = all_metrics.get(k, 0.0) + v
 
     avg_loss = total_loss / max(n_batches, 1)
-
-    # 平均指标
     n_samples = n_batches
     avg_metrics = {k: v / n_samples for k, v in all_metrics.items()}
+
+    # ★ 恢复原始权重
+    if ema is not None and use_ema:
+        ema.restore()
 
     return avg_loss, avg_metrics
 
@@ -518,12 +621,16 @@ def train(args=None) -> nn.Module:
 
     # ── 损失函数 ──
     loss_fn = build_loss_fn(args)
-    print(f"  损失函数: {args.loss_fn}")
+    print(f"  损失函数: {args.loss_fn} (含 Label Smoothing=0.1)")
 
     # ── 优化器 & 调度器 ──
+    # ★ 学习率调整: 1e-4 → 5e-5 (更适合 batch=1 的 3D U-Net)
+    effective_lr = getattr(args, 'effective_lr', 5e-5)
+    print(f"  学习率: {effective_lr} (已从 1e-4 调低以提升稳定性)")
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=args.lr,
+        lr=effective_lr,
         weight_decay=args.weight_decay,
     )
 
@@ -540,6 +647,16 @@ def train(args=None) -> nn.Module:
 
     # ── AMP Scaler ──
     scaler = GradScaler('cuda') if args.amp == 1 else None
+
+    # ── EMA 滑动平均 ──
+    # ★ EMA: 初始化滑动平均模型 (decay=0.999)
+    ema = ModelEMA(model, decay=0.999, device=device)
+    print(f"  EMA 权重滑动平均: decay=0.999")
+
+    # ★ 梯度累积步数 (命令行可通过 --grad_accum_steps 调整)
+    args.grad_accum_steps = getattr(args, 'grad_accum_steps', 4)
+    print(f"  梯度累积: accum_steps={args.grad_accum_steps}  "
+          f"(等效 batch_size={args.batch_size * args.grad_accum_steps})")
 
     # ── 恢复训练 ──
     start_epoch = 1
@@ -564,12 +681,12 @@ def train(args=None) -> nn.Module:
 
         # 训练
         train_loss = train_one_epoch(
-            model, train_loader, loss_fn, optimizer, device, epoch, args, scaler
+            model, train_loader, loss_fn, optimizer, device, epoch, args, scaler, ema
         )
 
-        # 验证
+        # 验证: 使用 EMA 权重 (更稳定)
         val_loss, val_metrics = validate(
-            model, val_loader, loss_fn, device, args
+            model, val_loader, loss_fn, device, args, ema, use_ema=True
         )
 
         # 学习率调度
@@ -609,6 +726,10 @@ def train(args=None) -> nn.Module:
                 ckpt_dir,
                 "best_model.pth" if is_best else f"epoch_{epoch}.pth",
             )
+            # ★ 保存 EMA 权重 (更稳定的模型)
+            if ema is not None:
+                ema.apply_shadow()
+
             torch.save({
                 "epoch": epoch,
                 "model_state_dict": model.state_dict(),
@@ -617,6 +738,10 @@ def train(args=None) -> nn.Module:
                 "val_metrics": val_metrics,
                 "args": vars(args),
             }, ckpt_path)
+
+            if ema is not None:
+                ema.restore()
+
             tag = " (BEST)" if is_best else ""
             print(f"    -> 保存检查点: {ckpt_path}{tag}")
 
