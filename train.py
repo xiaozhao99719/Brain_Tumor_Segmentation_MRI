@@ -1,20 +1,20 @@
 """
-train.py — BrainMRI 模型训练与验证 (优化版)
-==========================================
-完整训练流程:
-  - 支持 nnU-Net / Attention U-Net / TransUNet
-  - 3D 随机 patch 裁剪训练 (适配大体积)
-  - 损失函数: Dice+CE / Dice / CE / Focal（含 Label Smoothing）
-  - 评估指标: Dice / IoU / Sensitivity (per-class + mean)
-  - 每 epoch 打印训练 loss 和验证指标
-  - AMP 混合精度支持
+train.py -- BrainMRI Model Training & Validation (Optimized)
+=============================================================
+Complete training pipeline:
+    - Supports nnU-Net / Attention U-Net / TransUNet
+    - 3D random patch cropping (suited for large volumes)
+    - Loss functions: Dice+CE / Dice / CE / Focal (with Label Smoothing)
+    - Metrics: Dice / IoU / Sensitivity (per-class + mean)
+    - Per-epoch training loss and validation metrics
+    - AMP mixed-precision support
 
-优化点:
-  1. 梯度累积 (virtual batch_size=4) — 减少梯度噪声
-  2. 梯度裁剪 (max_norm=1.0) — 防止 loss 尖峰
-  3. EMA 权重滑动平均 (decay=0.999) — 训练更稳定，验证指标更平滑
-  4. Label Smoothing (smoothing=0.1) — 提升泛化能力
-  5. 学习率微调 (1e-4→5e-5) — 减少训练震荡
+Optimizations applied:
+    1. Gradient accumulation (virtual batch_size=4) -- reduces gradient noise
+    2. Gradient clipping (max_norm=1.0) -- prevents loss spikes
+    3. EMA weight exponential moving average (decay=0.999) -- more stable training
+    4. Label Smoothing (smoothing=0.1) -- improves generalization
+    5. Lower learning rate (1e-4->5e-5) -- reduces training oscillation
 """
 
 from __future__ import annotations
@@ -29,19 +29,19 @@ import torch.nn as nn
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
-# 从项目内导入
+# Project imports
 from data_load import BrainMRIDataset
 from model import build_model
 from param_set import parse_args
 
 
-# ═══════════════════════════════════════════════════════════════
-#  损失函数
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Loss Functions
+# ============================================================================
 
 
 class DiceLoss(nn.Module):
-    """多类别 Soft Dice Loss。"""
+    """Multi-class Soft Dice Loss."""
 
     def __init__(self, num_classes: int, smooth: float = 1.0):
         super().__init__()
@@ -49,7 +49,7 @@ class DiceLoss(nn.Module):
         self.smooth = smooth
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        """pred: (B, C, D, H, W) logits; target: (B, D, H, W) int64。"""
+        """pred: (B, C, D, H, W) logits; target: (B, D, H, W) int64."""
         pred_prob = torch.softmax(pred, dim=1)
         target_onehot = nn.functional.one_hot(target, self.num_classes)  # (B,D,H,W,C)
         target_onehot = target_onehot.permute(0, 4, 1, 2, 3).float()    # (B,C,D,H,W)
@@ -63,7 +63,7 @@ class DiceLoss(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    """多类别 Focal Loss。"""
+    """Multi-class Focal Loss."""
 
     def __init__(self, num_classes: int, gamma: float = 2.0):
         super().__init__()
@@ -77,52 +77,52 @@ class FocalLoss(nn.Module):
         return focal.mean()
 
 
-def build_loss_fn(args) -> nn.Module:
-    """根据参数构建损失函数。"""
-    nc = args.num_classes
-    if args.loss_fn == "dice_ce":
-        return _DiceCELoss(nc, args.dice_smooth)
-    elif args.loss_fn == "dice":
-        return DiceLoss(nc, args.dice_smooth)
-    elif args.loss_fn == "ce":
-        # ★ 改动: 添加 Label Smoothing (smoothing=0.1)
-        return nn.CrossEntropyLoss(label_smoothing=0.1)
-    elif args.loss_fn == "focal":
-        return FocalLoss(nc, args.focal_gamma)
-    else:
-        raise ValueError(f"未知损失函数: {args.loss_fn}")
-
-
 class _DiceCELoss(nn.Module):
-    """Dice + CE 联合损失（带 Label Smoothing）。"""
+    """Dice + CE combined loss (with Label Smoothing)."""
 
     def __init__(self, num_classes: int, smooth: float = 1.0):
         super().__init__()
         self.dice = DiceLoss(num_classes, smooth)
-        # ★ 改动: CE 损失加 Label Smoothing，防止过拟合
+        # CE with Label Smoothing to prevent overfitting
         self.ce = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     def forward(self, pred, target):
         return self.dice(pred, target) + self.ce(pred, target)
 
 
-# ═══════════════════════════════════════════════════════════════
-#  EMA (Exponential Moving Average) — 新增
-# ═══════════════════════════════════════════════════════════════
+def build_loss_fn(args) -> nn.Module:
+    """Build loss function from args."""
+    nc = args.num_classes
+    if args.loss_fn == "dice_ce":
+        return _DiceCELoss(nc, args.dice_smooth)
+    elif args.loss_fn == "dice":
+        return DiceLoss(nc, args.dice_smooth)
+    elif args.loss_fn == "ce":
+        return nn.CrossEntropyLoss(label_smoothing=0.1)
+    elif args.loss_fn == "focal":
+        return FocalLoss(nc, args.focal_gamma)
+    else:
+        raise ValueError(f"Unknown loss function: {args.loss_fn}")
+
+
+# ============================================================================
+#  EMA (Exponential Moving Average)
+# ============================================================================
 
 
 class ModelEMA:
     """
-    指数滑动平均权重更新。
+    Exponential moving average of model weights.
 
-    训练时维护一个 shadow model，在验证/保存时用 shadow weights，
-    等效于对训练过程做低通滤波，大幅提升稳定性和泛化能力。
+    Maintains a shadow model during training; verification / saving use
+    shadow weights, which is equivalent to low-pass filtering the training
+    process and significantly improves stability and generalization.
 
-    使用方式:
+    Usage:
         ema = ModelEMA(model, decay=0.999)
-        # 每次 forward 后:
+        # After each forward pass:
         ema.update()
-        # 验证时切换到 shadow weights:
+        # During evaluation, switch to shadow weights:
         ema.apply_shadow()
         evaluate(model)
         ema.restore()
@@ -130,39 +130,38 @@ class ModelEMA:
 
     def __init__(self, model: nn.Module, decay: float = 0.999, device=None):
         self.decay = decay
-        self.model = model
         self.shadow = {}
         self.backup = {}
-        self._register()
+        self._register(model)
 
-    def _register(self):
-        for name, param in self.model.named_parameters():
+    def _register(self, model: nn.Module):
+        for name, param in model.named_parameters():
             if param.requires_grad:
                 self.shadow[name] = param.data.clone().detach()
 
-    def update(self):
-        for name, param in self.model.named_parameters():
+    def update(self, model: nn.Module):
+        for name, param in model.named_parameters():
             if param.requires_grad:
                 assert name in self.shadow, f"EMA: parameter '{name}' not found"
                 new_avg = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
                 self.shadow[name] = new_avg.clone()
 
-    def apply_shadow(self):
-        for name, param in self.model.named_parameters():
+    def apply_shadow(self, model: nn.Module):
+        for name, param in model.named_parameters():
             if param.requires_grad:
                 self.backup[name] = param.data.clone()
                 param.data = self.shadow[name].clone()
 
-    def restore(self):
-        for name, param in self.model.named_parameters():
+    def restore(self, model: nn.Module):
+        for name, param in model.named_parameters():
             if param.requires_grad:
                 param.data = self.backup[name].clone()
         self.backup.clear()
 
 
-# ═══════════════════════════════════════════════════════════════
-#  评估指标
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Evaluation Metrics
+# ============================================================================
 
 
 def compute_metrics(
@@ -172,19 +171,19 @@ def compute_metrics(
     eps: float = 1e-7,
 ) -> Dict[str, float]:
     """
-    计算 per-class 与 mean 的 Dice / IoU / Sensitivity。
+    Compute per-class and mean Dice / IoU / Sensitivity.
 
     Parameters
     ----------
     pred : (B, C, D, H, W) logits
     target : (B, D, H, W) int64
-    num_classes : 类别数 (含背景)
-    eps : 防除零
+    num_classes : Number of classes (including background)
+    eps : Epsilon to prevent division by zero
 
     Returns
     -------
     dict with keys:
-        dice_c{i}, iou_c{i}, sens_c{i}  for each class
+        dice_c{i}, iou_c{i}, sens_c{i} for each class
         dice_mean, iou_mean, sens_mean
     """
     pred_labels = pred.argmax(dim=1)  # (B, D, H, W)
@@ -212,7 +211,7 @@ def compute_metrics(
         ious.append(iou)
         senss.append(sens)
 
-    # 跳过背景 (c=0) 计算 mean
+    # Skip background (c=0) for mean
     results["dice_mean"] = float(np.mean(dices[1:])) if num_classes > 1 else 0.0
     results["iou_mean"] = float(np.mean(ious[1:])) if num_classes > 1 else 0.0
     results["sens_mean"] = float(np.mean(senss[1:])) if num_classes > 1 else 0.0
@@ -220,9 +219,9 @@ def compute_metrics(
     return results
 
 
-# ═══════════════════════════════════════════════════════════════
-#  3D Patch 裁剪工具
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  3D Patch Crop Utilities
+# ============================================================================
 
 
 def random_patch_crop(
@@ -231,17 +230,21 @@ def random_patch_crop(
     patch_size: Tuple[int, int, int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    从完整 3D 体积中随机裁剪一个 patch。
+    Randomly crop a patch from a full 3D volume.
     volume: (C, D, H, W), seg: (D, H, W)
     """
     _, d, h, w = volume.shape
     pd, ph, pw = patch_size
 
     if d < pd or h < ph or w < pw:
-        # pad if volume smaller than patch
-        volume = nn.functional.pad(volume, [0, max(0, pw - w), 0, max(0, ph - h), 0, max(0, pd - d)])
-        seg = nn.functional.pad(seg.unsqueeze(0), [0, max(0, pw - w), 0, max(0, ph - h), 0, max(0, pd - d)])
-        seg = seg.squeeze(0)
+        # Pad if volume is smaller than patch
+        volume = nn.functional.pad(
+            volume, [0, max(0, pw - w), 0, max(0, ph - h), 0, max(0, pd - d)]
+        )
+        seg = nn.functional.pad(
+            seg.unsqueeze(0),
+            [0, max(0, pw - w), 0, max(0, ph - h), 0, max(0, pd - d)],
+        ).squeeze(0)
         _, d, h, w = volume.shape
 
     sd = torch.randint(0, d - pd + 1, (1,)).item()
@@ -257,11 +260,14 @@ def center_crop_or_pad(
     volume: torch.Tensor,
     target_size: Tuple[int, int, int],
 ) -> torch.Tensor:
-    """将体积中心裁剪/填充到目标尺寸。用于 TransUNet 等需要固定输入尺寸的模型。"""
+    """
+    Center-crop or pad a volume to the target size.
+    Used by TransUNet and other models that require a fixed input size.
+    """
     _, d, h, w = volume.shape
     td, th, tw = target_size
 
-    # pad if needed
+    # Pad if needed
     pad_d = max(0, td - d)
     pad_h = max(0, th - h)
     pad_w = max(0, tw - w)
@@ -279,9 +285,9 @@ def center_crop_or_pad(
     return volume[:, sd:sd + td, sh:sh + th, sw:sw + tw]
 
 
-# ═══════════════════════════════════════════════════════════════
-#  训练单个 Epoch
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Training One Epoch
+# ============================================================================
 
 
 def train_one_epoch(
@@ -296,12 +302,12 @@ def train_one_epoch(
     ema: ModelEMA = None,
 ) -> float:
     """
-    训练一个 epoch, 返回平均 loss。
+    Train one epoch and return the average loss.
 
-    ★ 优化:
-      - 梯度累积 (accumulation_steps=4): 等效 batch_size=4
-      - 梯度裁剪 (max_norm=1.0): 防止大梯度炸训练
-      - EMA 权重更新: 保持 shadow weights 同步
+    Optimizations applied:
+        - Gradient accumulation (accumulation_steps=4): effective batch_size=4
+        - Gradient clipping (max_norm=1.0): prevents gradient explosion
+        - EMA weight update: keeps shadow weights in sync
     """
     model.train()
     total_loss = 0.0
@@ -309,19 +315,16 @@ def train_one_epoch(
 
     patch_size = tuple(args.patch_size)
     use_amp = args.amp == 1
+    accum_steps = args.grad_accum_steps
+    grad_scale = 1.0 / accum_steps  # Scale loss to compensate for accumulation
 
-    # ★ 梯度累积步数: 等效 batch_size = batch_size * accum
-    accum_steps = getattr(args, 'grad_accum_steps', 4)
-    grad_scale = 1.0 / accum_steps  # 缩放 loss 以补偿梯度累积
-
-    for batch_idx, (volume, seg, info) in enumerate(dataloader):
+    for batch_idx, (volume, seg, _) in enumerate(dataloader):
         # volume: (B, 4, D, H, W), seg: (B, D, H, W)
         volume = volume.to(device, non_blocking=True)
         seg = seg.to(device, non_blocking=True)
 
-        # 随机 patch 裁剪 (减少显存)
+        # Random patch cropping (reduces GPU memory)
         if args.random_patch == 1 and args.model_name != "transunet":
-            # 对 batch 中每个样本单独裁剪
             patches_v, patches_s = [], []
             for i in range(volume.size(0)):
                 pv, ps = random_patch_crop(volume[i], seg[i], patch_size)
@@ -330,23 +333,22 @@ def train_one_epoch(
             volume = torch.stack(patches_v)
             seg = torch.stack(patches_s)
         elif args.model_name == "transunet":
-            # TransUNet 需要固定输入尺寸
+            # TransUNet requires fixed input size
             fixed_size = (args.vit_img_size,) * 3
             patches_v, patches_s = [], []
             for i in range(volume.size(0)):
                 pv = center_crop_or_pad(volume[i], fixed_size)
-                ps_vol = seg[i].unsqueeze(0)
-                ps_vol = center_crop_or_pad(ps_vol, fixed_size)
+                ps_vol = center_crop_or_pad(seg[i].unsqueeze(0), fixed_size)
                 patches_v.append(pv)
                 patches_s.append(ps_vol.squeeze(0))
             volume = torch.stack(patches_v)
             seg = torch.stack(patches_s)
 
-        # ★ 梯度累积: 只在每个 accum 循环开始时清零
+        # Zero gradients at the start of each accumulation group
         if batch_idx % accum_steps == 0:
             optimizer.zero_grad(set_to_none=True)
 
-        # ★ 前向传播（loss 乘以 grad_scale 用于补偿）
+        # Forward pass
         if use_amp and scaler is not None:
             with autocast('cuda'):
                 pred = model(volume)
@@ -357,9 +359,8 @@ def train_one_epoch(
             loss = loss_fn(pred, seg) * grad_scale
             loss.backward()
 
-        # ★ 梯度累积: 每 accum_steps 步才执行一次 optimizer.step
+        # Optimizer step every accum_steps batches
         if (batch_idx + 1) % accum_steps == 0:
-            # ★ 梯度裁剪 (max_norm=1.0)
             if scaler is not None:
                 scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -372,11 +373,10 @@ def train_one_epoch(
 
             optimizer.zero_grad(set_to_none=True)
 
-            # ★ EMA 权重更新 (decay=0.999)
             if ema is not None:
-                ema.update()
+                ema.update(model)
 
-        total_loss += loss.item() * accum_steps  # 还原为原始 scale
+        total_loss += loss.item() * accum_steps  # Restore original scale
         n_batches += 1
 
         if (batch_idx + 1) % args.log_every == 0:
@@ -387,9 +387,9 @@ def train_one_epoch(
     return avg_loss
 
 
-# ═══════════════════════════════════════════════════════════════
-#  验证
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Validation
+# ============================================================================
 
 
 @torch.no_grad()
@@ -403,16 +403,15 @@ def validate(
     use_ema: bool = True,
 ) -> Tuple[float, Dict[str, float]]:
     """
-    在验证集上评估, 返回 (avg_loss, metrics_dict)。
+    Evaluate on the validation set. Returns (avg_loss, metrics_dict).
 
-    ★ 优化: 默认使用 EMA shadow weights 进行推理，
-      保存的模型和验证指标都会更稳定。
+    By default, uses EMA shadow weights for inference, which gives
+    more stable validation metrics.
     """
     model.eval()
 
-    # ★ 切换到 EMA 权重做验证/推理
     if ema is not None and use_ema:
-        ema.apply_shadow()
+        ema.apply_shadow(model)
 
     total_loss = 0.0
     n_batches = 0
@@ -422,7 +421,7 @@ def validate(
     overlap = args.patch_overlap
     use_amp = args.amp == 1
 
-    for volume, seg, info in dataloader:
+    for volume, seg, _ in dataloader:
         volume = volume.to(device, non_blocking=True)
         seg = seg.to(device, non_blocking=True)
         B = volume.size(0)
@@ -431,13 +430,13 @@ def validate(
             vol_i = volume[i]      # (4, D, H, W)
             seg_i = seg[i]         # (D, H, W)
 
-            # 对整个体积做滑窗推理
+            # Sliding window inference on the full volume
             pred_full = _sliding_window_inference(
                 model, vol_i, patch_size, overlap, device, use_amp
             )  # (C, D, H, W)
 
             pred_batch = pred_full.unsqueeze(0)   # (1, C, D, H, W)
-            seg_batch = seg_i.unsqueeze(0)         # (1, D, H, W)
+            seg_batch = seg_i.unsqueeze(0)        # (1, D, H, W)
 
             loss = loss_fn(pred_batch, seg_batch)
             total_loss += loss.item()
@@ -451,9 +450,8 @@ def validate(
     n_samples = n_batches
     avg_metrics = {k: v / n_samples for k, v in all_metrics.items()}
 
-    # ★ 恢复原始权重
     if ema is not None and use_ema:
-        ema.restore()
+        ema.restore(model)
 
     return avg_loss, avg_metrics
 
@@ -467,28 +465,29 @@ def _sliding_window_inference(
     use_amp: bool,
 ) -> torch.Tensor:
     """
-    对单个 3D 体积做滑窗推理, 返回与输入同尺寸的概率图。
+    Sliding window inference on a single 3D volume.
+
+    Returns a probability map of the same spatial size as the input.
 
     volume: (C, D, H, W)
     """
     model.eval()
     C_in, D, H, W = volume.shape
-    num_classes = None  # 推断得到
 
     stride = tuple(int(p * (1 - overlap)) for p in patch_size)
     pd, ph, pw = patch_size
     sd, sh, sw = stride
 
-    # 输出累积器
-    output_sum = torch.zeros(1, D, H, W, device=device)  # placeholder
+    # Output accumulators; num_classes is determined from the first forward pass
+    output_sum = None
     count_map = torch.zeros(D, H, W, device=device)
 
-    # 遍历所有 patch 位置
+    # Iterate over all patch positions
     d_starts = list(range(0, max(D - pd + 1, 1), max(sd, 1)))
     h_starts = list(range(0, max(H - ph + 1, 1), max(sh, 1)))
     w_starts = list(range(0, max(W - pw + 1, 1), max(sw, 1)))
 
-    # 确保最后一个 patch 能覆盖边缘
+    # Ensure the last patch covers the edge
     if d_starts[-1] + pd < D:
         d_starts.append(max(D - pd, 0))
     if h_starts[-1] + ph < H:
@@ -496,7 +495,6 @@ def _sliding_window_inference(
     if w_starts[-1] + pw < W:
         w_starts.append(max(W - pw, 0))
 
-    first = True
     for d_s in d_starts:
         for h_s in h_starts:
             for w_s in w_starts:
@@ -506,7 +504,7 @@ def _sliding_window_inference(
 
                 patch = volume[:, d_s:d_e, h_s:h_e, w_s:w_e].unsqueeze(0)  # (1, C, d, h, w)
 
-                # pad to patch_size if needed
+                # Pad to patch_size if needed
                 if patch.shape[2:] != patch_size:
                     patch = nn.functional.pad(
                         patch,
@@ -521,12 +519,11 @@ def _sliding_window_inference(
 
                 pred_prob = torch.softmax(pred_patch, dim=1)  # (1, C, pd, ph, pw)
 
-                if first:
+                if output_sum is None:
                     num_classes = pred_prob.size(1)
                     output_sum = torch.zeros(num_classes, D, H, W, device=device)
-                    first = False
 
-                # 去掉 padding
+                # Remove padding
                 actual_d = d_e - d_s
                 actual_h = h_e - h_s
                 actual_w = w_e - w_s
@@ -535,36 +532,35 @@ def _sliding_window_inference(
                 output_sum[:, d_s:d_e, h_s:h_e, w_s:w_e] += pred_prob
                 count_map[d_s:d_e, h_s:h_e, w_s:w_e] += 1.0
 
-    # 平均重叠区域
+    # Average overlapping regions
     count_map = count_map.clamp(min=1.0)
-    for c in range(num_classes):
-        output_sum[c] /= count_map
+    output_sum = output_sum / count_map.unsqueeze(0)  # type: ignore[assignment]
 
-    return output_sum  # (C, D, H, W) logits-like (实际是概率)
+    return output_sum  # (C, D, H, W) probabilities
 
 
-# ═══════════════════════════════════════════════════════════════
-#  完整训练流程
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Full Training Pipeline
+# ============================================================================
 
 
 def train(args=None) -> nn.Module:
     """
-    完整训练流程: 数据加载 → 模型构建 → 训练循环 → 保存最优权重。
+    Complete training pipeline: data loading -> model build -> training loop -> save best weights.
 
     Parameters
     ----------
     args : argparse.Namespace | None
-        若为 None 则自动解析命令行参数。
+        If None, parses from command line automatically.
 
     Returns
     -------
-    model : 训练完成的模型
+    model : Trained model
     """
     if args is None:
         args = parse_args()
 
-    # 固定随机种子
+    # Set random seeds
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     if torch.cuda.is_available():
@@ -572,14 +568,14 @@ def train(args=None) -> nn.Module:
 
     device = torch.device(args.device)
 
-    # ── 创建输出目录 ──
+    # -- Create output directories --
     os.makedirs(args.output_dir, exist_ok=True)
     ckpt_dir = os.path.join(args.output_dir, args.model_name)
     os.makedirs(ckpt_dir, exist_ok=True)
 
-    # ── 数据集 ──
+    # -- Dataset --
     print("=" * 70)
-    print("  加载数据集...")
+    print("  Loading datasets...")
     print("=" * 70)
 
     train_ds = BrainMRIDataset(
@@ -604,33 +600,31 @@ def train(args=None) -> nn.Module:
     )
     val_loader = DataLoader(
         val_ds,
-        batch_size=1,  # 验证时逐样本推理
+        batch_size=1,  # Per-sample sliding window inference
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=bool(args.pin_memory),
     )
 
-    print(f"  训练集: {len(train_ds)} 样本")
-    print(f"  验证集: {len(val_ds)} 样本")
+    print(f"  Training set: {len(train_ds)} samples")
+    print(f"  Validation set: {len(val_ds)} samples")
 
-    # ── 模型 ──
-    print(f"\n  构建模型: {args.model_name}")
+    # -- Model --
+    print(f"\n  Building model: {args.model_name}")
     model = build_model(args).to(device)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  可训练参数量: {n_params:,}")
+    print(f"  Trainable parameters: {n_params:,}")
 
-    # ── 损失函数 ──
+    # -- Loss function --
     loss_fn = build_loss_fn(args)
-    print(f"  损失函数: {args.loss_fn} (含 Label Smoothing=0.1)")
+    print(f"  Loss function: {args.loss_fn}")
 
-    # ── 优化器 & 调度器 ──
-    # ★ 学习率调整: 1e-4 → 5e-5 (更适合 batch=1 的 3D U-Net)
-    effective_lr = getattr(args, 'effective_lr', 5e-5)
-    print(f"  学习率: {effective_lr} (已从 1e-4 调低以提升稳定性)")
+    # -- Optimizer & Scheduler --
+    print(f"  Learning rate: {args.effective_lr}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=effective_lr,
+        lr=args.effective_lr,
         weight_decay=args.weight_decay,
     )
 
@@ -645,24 +639,22 @@ def train(args=None) -> nn.Module:
     else:
         scheduler = None
 
-    # ── AMP Scaler ──
+    # -- AMP Scaler --
     scaler = GradScaler('cuda') if args.amp == 1 else None
 
-    # ── EMA 滑动平均 ──
-    # ★ EMA: 初始化滑动平均模型 (decay=0.999)
+    # -- EMA --
     ema = ModelEMA(model, decay=0.999, device=device)
-    print(f"  EMA 权重滑动平均: decay=0.999")
+    print(f"  EMA weight moving average: decay=0.999")
 
-    # ★ 梯度累积步数 (命令行可通过 --grad_accum_steps 调整)
-    args.grad_accum_steps = getattr(args, 'grad_accum_steps', 4)
-    print(f"  梯度累积: accum_steps={args.grad_accum_steps}  "
-          f"(等效 batch_size={args.batch_size * args.grad_accum_steps})")
+    # -- Gradient accumulation --
+    print(f"  Gradient accumulation: accum_steps={args.grad_accum_steps}  "
+          f"(effective batch_size={args.batch_size * args.grad_accum_steps})")
 
-    # ── 恢复训练 ──
+    # -- Resume from checkpoint --
     start_epoch = 1
     best_dice = 0.0
     if args.resume_ckpt and os.path.isfile(args.resume_ckpt):
-        print(f"  恢复检查点: {args.resume_ckpt}")
+        print(f"  Resuming from checkpoint: {args.resume_ckpt}")
         ckpt = torch.load(args.resume_ckpt, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -671,31 +663,31 @@ def train(args=None) -> nn.Module:
         if scheduler and "scheduler_state_dict" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
 
-    # ── 训练循环 ──
+    # -- Training loop --
     print("\n" + "=" * 70)
-    print("  开始训练")
+    print("  Starting training")
     print("=" * 70)
 
     for epoch in range(start_epoch, args.epochs + 1):
         t0 = time.time()
 
-        # 训练
+        # Train
         train_loss = train_one_epoch(
             model, train_loader, loss_fn, optimizer, device, epoch, args, scaler, ema
         )
 
-        # 验证: 使用 EMA 权重 (更稳定)
+        # Validate (using EMA weights for more stability)
         val_loss, val_metrics = validate(
             model, val_loader, loss_fn, device, args, ema, use_ema=True
         )
 
-        # 学习率调度
+        # Learning rate scheduling
         if scheduler is not None:
             scheduler.step()
 
         elapsed = time.time() - t0
 
-        # 打印 epoch 结果
+        # Print epoch summary
         print(
             f"\n[Epoch {epoch}/{args.epochs}]  "
             f"Train Loss: {train_loss:.5f}  |  "
@@ -706,7 +698,7 @@ def train(args=None) -> nn.Module:
             f"Time: {elapsed/60:.1f}min"
         )
 
-        # per-class 详细指标
+        # Per-class details
         for c in range(args.num_classes):
             print(
                 f"    Class {c}: "
@@ -715,7 +707,7 @@ def train(args=None) -> nn.Module:
                 f"Sens={val_metrics[f'sens_c{c}']:.4f}"
             )
 
-        # 保存最优模型
+        # Save best model
         current_dice = val_metrics["dice_mean"]
         is_best = current_dice > best_dice
         if is_best:
@@ -726,9 +718,9 @@ def train(args=None) -> nn.Module:
                 ckpt_dir,
                 "best_model.pth" if is_best else f"epoch_{epoch}.pth",
             )
-            # ★ 保存 EMA 权重 (更稳定的模型)
+            # Save with EMA weights (more stable model)
             if ema is not None:
-                ema.apply_shadow()
+                ema.apply_shadow(model)
 
             torch.save({
                 "epoch": epoch,
@@ -740,14 +732,14 @@ def train(args=None) -> nn.Module:
             }, ckpt_path)
 
             if ema is not None:
-                ema.restore()
+                ema.restore(model)
 
             tag = " (BEST)" if is_best else ""
-            print(f"    -> 保存检查点: {ckpt_path}{tag}")
+            print(f"    -> Saved checkpoint: {ckpt_path}{tag}")
 
     print("\n" + "=" * 70)
-    print(f"  训练完成!  最优 Dice(Mean): {best_dice:.4f}")
-    print(f"  检查点目录: {ckpt_dir}")
+    print(f"  Training complete!  Best Dice(Mean): {best_dice:.4f}")
+    print(f"  Checkpoint directory: {ckpt_dir}")
     print("=" * 70)
 
     return model

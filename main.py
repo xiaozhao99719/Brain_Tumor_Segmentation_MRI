@@ -1,27 +1,27 @@
 """
-main.py — BrainMRI 分割项目主入口
-====================================
-负责调用各模块的函数, 按流程执行:
-  1. 解析参数 (param_set)
-  2. 离线预处理 (data_load)  — 可选, 仅在缓存不存在时需要
-  3. 训练 (train)
-  4. 测试评估 (test)
+main.py -- BrainMRI Segmentation Project Main Entry
+====================================================
+Orchestrates the full pipeline by calling module functions in order:
+    1. Parse arguments (param_set)
+    2. Offline preprocessing (data_load)  -- optional, only needed if cache is missing
+    3. Training (train)
+    4. Testing / evaluation (test)
 
-用法示例:
-  # 完整流程: 预处理 + 训练 + 测试
-  python main.py --mode all --model_name nnunet
+Usage examples:
+    # Full pipeline: preprocess + train + test
+    python main.py --mode all --model_name nnunet
 
-  # 仅训练
-  python main.py --mode train --model_name attention_unet
+    # Training only
+    python main.py --mode train --model_name attention_unet
 
-  # 仅测试
-  python main.py --mode test --model_name transunet
+    # Testing only
+    python main.py --mode test --model_name transunet
 
-  # 仅预处理
-  python main.py --mode preprocess --preprocess_workers 8
+    # Preprocessing only
+    python main.py --mode preprocess --preprocess_workers 8
 
-  # 训练 + 测试 (跳过预处理)
-  python main.py --mode train_test --model_name nnunet --epochs 50
+    # Train + test (skip preprocessing)
+    python main.py --mode train_test --model_name nnunet --epochs 50
 """
 
 from __future__ import annotations
@@ -36,17 +36,17 @@ import torch
 from param_set import parse_args
 
 
-# ═══════════════════════════════════════════════════════════════
-#  子流程函数
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Sub-pipeline Functions
+# ============================================================================
 
 
 def run_preprocess(args) -> None:
-    """调用 data_load 执行离线预处理。"""
+    """Run offline preprocessing via data_load."""
     from data_load import preprocess_split
 
     print("\n" + "=" * 70)
-    print("  步骤: 数据预处理")
+    print("  Step: Data Preprocessing")
     print("=" * 70)
 
     for split in ["train", "val", "test"]:
@@ -57,57 +57,56 @@ def run_preprocess(args) -> None:
             force=args.preprocess_force,
         )
 
-    print("  预处理完成!\n")
+    print("  Preprocessing done!\n")
 
 
 def run_train(args) -> None:
-    """调用 train 模块执行训练。"""
+    """Run training via the train module."""
     from train import train as train_fn
 
     print("\n" + "=" * 70)
-    print("  步骤: 模型训练")
+    print("  Step: Model Training")
     print("=" * 70)
 
     t0 = time.time()
     model = train_fn(args)
     elapsed = time.time() - t0
-    print(f"  训练耗时: {elapsed / 60:.1f} 分钟\n")
+    print(f"  Training time: {elapsed / 60:.1f} minutes\n")
 
 
 def run_test(args) -> None:
-    """调用 test 模块执行评估。"""
+    """Run evaluation via the test module."""
     from test import test as test_fn
 
     print("\n" + "=" * 70)
-    print("  步骤: 模型测试")
+    print("  Step: Model Testing")
     print("=" * 70)
 
     t0 = time.time()
     metrics = test_fn(args)
     elapsed = time.time() - t0
-    print(f"  测试耗时: {elapsed / 60:.1f} 分钟\n")
+    print(f"  Testing time: {elapsed / 60:.1f} minutes\n")
 
 
 def run_info(args) -> None:
-    """调用 data_load 打印数据集信息。"""
+    """Print dataset info via data_load."""
     from data_load import print_dataset_info
 
     print_dataset_info(split="all", target_spacing=args.target_spacing)
 
 
-# ═══════════════════════════════════════════════════════════════
-#  主函数
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Main Entry Point
+# ============================================================================
 
 
 def main() -> None:
-    """主入口: 解析参数 → 按模式执行对应流程。"""
+    """Main entry: parse args -> execute pipeline by mode."""
 
-    # 解析全局参数
+    # Parse global arguments
     args = parse_args()
 
-    # 添加运行模式参数 (不放入 param_set 避免与其他模块耦合)
-    # 使用 sys.argv 中的 --mode 或默认 "all"
+    # Extract --mode from sys.argv (kept here to avoid coupling param_set with main)
     mode = "all"
     for i, arg in enumerate(sys.argv):
         if arg == "--mode" and i + 1 < len(sys.argv):
@@ -116,29 +115,29 @@ def main() -> None:
 
     valid_modes = ["all", "preprocess", "train", "test", "train_test", "info"]
     if mode not in valid_modes:
-        print(f"错误: 未知模式 '{mode}', 可选: {valid_modes}")
+        print(f"Error: unknown mode '{mode}', valid modes: {valid_modes}")
         sys.exit(1)
 
-    # ── 环境信息 ──
+    # -- Environment info --
     print("=" * 70)
-    print("  BrainMRI 分割项目")
+    print("  BrainMRI Segmentation Project")
     print("=" * 70)
-    print(f"  运行模式 : {mode}")
-    print(f"  模型     : {args.model_name}")
-    print(f"  设备     : {args.device}")
-    print(f"  AMP      : {'启用' if args.amp == 1 else '关闭'}")
-    print(f"  数据根目录: {args.data_root}")
-    print(f"  缓存目录  : {args.cache_root}")
-    print(f"  输出目录  : {args.output_dir}")
-    print(f"  Epochs   : {args.epochs}")
-    print(f"  Batch Size: {args.batch_size}")
-    print(f"  学习率   : {args.lr}")
-    print(f"  Patch Size: {args.patch_size}")
+    print(f"  Mode       : {mode}")
+    print(f"  Model      : {args.model_name}")
+    print(f"  Device     : {args.device}")
+    print(f"  AMP        : {'ON' if args.amp == 1 else 'OFF'}")
+    print(f"  Data root  : {args.data_root}")
+    print(f"  Cache root : {args.cache_root}")
+    print(f"  Output dir : {args.output_dir}")
+    print(f"  Epochs     : {args.epochs}")
+    print(f"  Batch size : {args.batch_size}")
+    print(f"  LR         : {args.effective_lr}")
+    print(f"  Patch size : {args.patch_size}")
     if torch.cuda.is_available():
-        print(f"  GPU      : {torch.cuda.get_device_name(args.gpu)}")
+        print(f"  GPU        : {torch.cuda.get_device_name(args.gpu)}")
     print("=" * 70)
 
-    # ── 执行流程 ──
+    # -- Execute pipeline --
     if mode == "info":
         run_info(args)
         return
@@ -153,7 +152,7 @@ def main() -> None:
         run_test(args)
 
     print("\n" + "=" * 70)
-    print("  全部流程完成!")
+    print("  All steps complete!")
     print("=" * 70)
 
 

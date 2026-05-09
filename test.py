@@ -1,17 +1,17 @@
 """
-test.py — BrainMRI 模型测试与评估
-====================================
-在测试集上加载训练好的模型权重, 做完整评估:
-  - 滑窗推理 (与训练验证一致)
-  - 计算 Dice / IoU / Sensitivity (per-class + mean)
-  - 可选 TTA (4 翻转增强)
-  - 可选保存预测结果为 NIfTI
+test.py -- BrainMRI Model Testing & Evaluation
+==============================================
+Load a trained model checkpoint and evaluate on the test set:
+    - Sliding window inference (consistent with training / validation)
+    - Metrics: Dice / IoU / Sensitivity (per-class + mean)
+    - Optional TTA (4 flip augmentations)
+    - Optional save predictions as NIfTI files
 """
 
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -24,28 +24,28 @@ from param_set import parse_args
 from train import compute_metrics, _sliding_window_inference
 
 
-# ═══════════════════════════════════════════════════════════════
-#  TTA 辅助
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  TTA Helpers
+# ============================================================================
 
 
 def _tta_transforms(volume: torch.Tensor):
     """
-    生成 4 种翻转变体 + 逆变换函数。
+    Generate 4 flip variants of the volume and their inverse transform functions.
     volume: (C, D, H, W)
     """
     transforms = [
-        (volume, lambda x: x),                                     # 原始
-        (torch.flip(volume, [2]), lambda x: torch.flip(x, [2])),   # D 翻转
-        (torch.flip(volume, [3]), lambda x: torch.flip(x, [3])),   # H 翻转
-        (torch.flip(volume, [4]), lambda x: torch.flip(x, [4])),   # W 翻转
+        (volume, lambda x: x),                                     # Original
+        (torch.flip(volume, [2]), lambda x: torch.flip(x, [2])),   # D flip
+        (torch.flip(volume, [3]), lambda x: torch.flip(x, [3])),   # H flip
+        (torch.flip(volume, [4]), lambda x: torch.flip(x, [4])),   # W flip
     ]
     return transforms
 
 
-# ═══════════════════════════════════════════════════════════════
-#  单样本推理 (含 TTA)
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Single-Sample Inference (with TTA)
+# ============================================================================
 
 
 @torch.no_grad()
@@ -59,12 +59,11 @@ def inference_single(
     use_tta: bool = False,
 ) -> torch.Tensor:
     """
-    对单个 3D 体积做推理, 返回 (num_classes, D, H, W) 概率图。
+    Run inference on a single 3D volume. Returns (num_classes, D, H, W) probability map.
     """
     model.eval()
 
     if not use_amp:
-        # 不用 autocast 时直接调用滑窗推理
         return _sliding_window_inference(
             model, volume, patch_size, overlap, device, use_amp=False
         )
@@ -76,7 +75,7 @@ def inference_single(
             )
         return prob
 
-    # TTA: 对每种变换做推理, 再逆变换求平均
+    # TTA: average predictions over all flip variants
     tta_pairs = _tta_transforms(volume)
     prob_sum = None
 
@@ -95,32 +94,32 @@ def inference_single(
     return prob_avg
 
 
-# ═══════════════════════════════════════════════════════════════
-#  完整测试流程
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Full Test Pipeline
+# ============================================================================
 
 
 def test(args=None) -> Dict[str, float]:
     """
-    在测试集上评估模型, 打印并返回指标结果。
+    Evaluate the model on the test set. Prints and returns metrics.
 
     Parameters
     ----------
     args : argparse.Namespace | None
-        若为 None 则自动解析命令行参数。
+        If None, parses from command line automatically.
 
     Returns
     -------
-    metrics : dict, 包含 per-class 和 mean 的 Dice / IoU / Sensitivity
+    metrics : dict with per-class and mean Dice / IoU / Sensitivity
     """
     if args is None:
         args = parse_args()
 
     device = torch.device(args.device)
 
-    # ── 数据集 ──
+    # -- Dataset --
     print("=" * 70)
-    print("  加载测试数据集...")
+    print("  Loading test dataset...")
     print("=" * 70)
 
     test_ds = BrainMRIDataset(
@@ -135,18 +134,18 @@ def test(args=None) -> Dict[str, float]:
         num_workers=args.num_workers,
         pin_memory=bool(args.pin_memory),
     )
-    print(f"  测试集: {len(test_ds)} 样本 (split={args.test_split})")
+    print(f"  Test set: {len(test_ds)} samples (split={args.test_split})")
 
-    # ── 模型 ──
-    print(f"\n  构建模型: {args.model_name}")
+    # -- Model --
+    print(f"\n  Building model: {args.model_name}")
     model = build_model(args).to(device)
 
-    # ── 加载权重 ──
+    # -- Load weights --
     ckpt_dir = os.path.join(args.output_dir, args.model_name)
     ckpt_path = os.path.join(ckpt_dir, "best_model.pth")
 
     if not os.path.isfile(ckpt_path):
-        # 尝试找其他权重文件
+        # Try to find an alternative checkpoint
         alt_ckpts = [
             f for f in os.listdir(ckpt_dir)
             if f.endswith(".pth")
@@ -154,35 +153,34 @@ def test(args=None) -> Dict[str, float]:
 
         if alt_ckpts:
             ckpt_path = os.path.join(ckpt_dir, sorted(alt_ckpts)[-1])
-            print(f"  best_model.pth 未找到, 使用: {ckpt_path}")
+            print(f"  best_model.pth not found, using: {ckpt_path}")
         else:
             raise FileNotFoundError(
-                f"未找到检查点: {ckpt_path}  "
-                f"请先运行训练, 或通过 --resume_ckpt 指定路径"
+                f"Checkpoint not found: {ckpt_path}.  "
+                f"Run training first, or specify --resume_ckpt"
             )
 
-    print(f"  加载权重: {ckpt_path}")
+    print(f"  Loading weights: {ckpt_path}")
     ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     if "val_metrics" in ckpt:
-        print(f"  训练时最优 Dice(Mean): {ckpt['val_metrics'].get('dice_mean', 'N/A')}")
+        print(f"  Training best Dice(Mean): {ckpt['val_metrics'].get('dice_mean', 'N/A')}")
 
-    # ── 推理参数 ──
+    # -- Inference parameters --
     patch_size = tuple(args.patch_size)
     overlap = args.patch_overlap
     use_amp = args.amp == 1
     use_tta = args.tta
 
-    # ── 评估 ──
+    # -- Evaluation --
     print("\n" + "=" * 70)
-    print("  开始测试评估")
+    print("  Starting test evaluation")
     print("=" * 70)
 
     all_metrics: Dict[str, float] = {}
     n_samples = 0
 
-    # 输出目录
     pred_dir = os.path.join(args.output_dir, args.model_name, "predictions")
     if args.save_pred:
         os.makedirs(pred_dir, exist_ok=True)
@@ -195,12 +193,12 @@ def test(args=None) -> Dict[str, float]:
         vol_i = volume[0]   # (C, D, H, W)
         seg_i = seg[0]       # (D, H, W)
 
-        # 推理
+        # Inference
         prob_map = inference_single(
             model, vol_i, patch_size, overlap, device, use_amp, use_tta
         )  # (C, D, H, W)
 
-        # 计算指标
+        # Compute metrics
         pred_batch = prob_map.unsqueeze(0)   # (1, C, D, H, W)
         seg_batch = seg_i.unsqueeze(0)        # (1, D, H, W)
 
@@ -210,7 +208,7 @@ def test(args=None) -> Dict[str, float]:
             all_metrics[k] = all_metrics.get(k, 0.0) + v
         n_samples += 1
 
-        # 打印单样本结果
+        # Print per-sample result
         patient_id = info["patient_id"][0] if isinstance(info["patient_id"], (list, tuple)) else info["patient_id"]
         print(
             f"  [{idx+1}/{len(test_ds)}] {patient_id}: "
@@ -219,23 +217,22 @@ def test(args=None) -> Dict[str, float]:
             f"Sens={metrics['sens_mean']:.4f}"
         )
 
-        # 保存预测 NIfTI
+        # Save prediction NIfTI
         if args.save_pred:
             _save_prediction_nifti(prob_map, info, pred_dir)
 
-    # ── 平均指标 ──
+    # -- Average metrics --
     avg_metrics = {k: v / n_samples for k, v in all_metrics.items()}
 
-    # ── 打印结果 ──
+    # -- Print results --
     print("\n" + "=" * 70)
-    print("  测试评估结果")
+    print("  Test Evaluation Results")
     print("=" * 70)
-    print(f"  模型: {args.model_name}")
-    print(f"  数据集: {args.test_split} ({n_samples} 样本)")
-    print(f"  TTA: {'启用' if use_tta else '关闭'}")
+    print(f"  Model   : {args.model_name}")
+    print(f"  Dataset : {args.test_split} ({n_samples} samples)")
+    print(f"  TTA     : {'ON' if use_tta else 'OFF'}")
     print()
 
-    # per-class
     label_names = ["Background", "NCR (Necrotic core)", "ED (Edema)", "ET (Enhancing tumor)"]
     for c in range(args.num_classes):
         name = label_names[c] if c < len(label_names) else f"Class {c}"
@@ -248,14 +245,14 @@ def test(args=None) -> Dict[str, float]:
 
     print()
     print(
-        f"  ── Mean (不含背景) ──\n"
+        f"  -- Mean (excluding background) --\n"
         f"    Dice: {avg_metrics['dice_mean']:.4f}\n"
         f"    IoU:  {avg_metrics['iou_mean']:.4f}\n"
         f"    Sens: {avg_metrics['sens_mean']:.4f}"
     )
     print("=" * 70)
 
-    # ── 保存指标到文件 ──
+    # -- Save metrics to file --
     metrics_path = os.path.join(args.output_dir, args.model_name, "test_metrics.txt")
     with open(metrics_path, "w", encoding="utf-8") as f:
         f.write(f"Model: {args.model_name}\n")
@@ -272,14 +269,14 @@ def test(args=None) -> Dict[str, float]:
         f.write(f"  IoU:  {avg_metrics['iou_mean']:.4f}\n")
         f.write(f"  Sens: {avg_metrics['sens_mean']:.4f}\n")
 
-    print(f"  指标已保存至: {metrics_path}")
+    print(f"  Metrics saved to: {metrics_path}")
 
     return avg_metrics
 
 
-# ═══════════════════════════════════════════════════════════════
-#  保存 NIfTI 预测
-# ═══════════════════════════════════════════════════════════════
+# ============================================================================
+#  Save NIfTI Prediction
+# ============================================================================
 
 
 def _save_prediction_nifti(
@@ -288,13 +285,13 @@ def _save_prediction_nifti(
     pred_dir: str,
 ) -> None:
     """
-    将预测概率图保存为 NIfTI 文件。
+    Save prediction probability map as a NIfTI file.
     prob_map: (C, D, H, W) on any device
     """
     try:
         import nibabel as nib
     except ImportError:
-        print("    [警告] nibabel 未安装, 跳过 NIfTI 保存")
+        print("    [WARNING] nibabel not installed, skipping NIfTI save")
         return
 
     pred_labels = prob_map.argmax(dim=0).cpu().numpy().astype(np.uint8)  # (D, H, W)

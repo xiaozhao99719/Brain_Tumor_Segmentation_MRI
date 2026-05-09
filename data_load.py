@@ -8,33 +8,33 @@ Optimized version of the original data_load.py with the following improvements:
    seg=uint8). Training-time reads from disk are 100x+ faster.
 2. **Fixed preprocessing order**: The original performed RAS correction after
    resampling using a stale affine, causing inconsistencies. The new pipeline
-   is: load → canonical orientation (RAS) → resample → N4 → percentile
-   clip → z-score normalize.
+   is: load -> canonical orientation (RAS) -> resample -> N4 -> percentile
+   clip -> z-score normalize.
 3. **N4 speedup**: Iterations reduced from [50,50,50,50] to [20,20,20,10],
    with shrink_factor to estimate bias field on a downsampled grid
-   (recommended by SimpleITK docs). An `N4_ENABLED` toggle is provided so
+   (recommended by SimpleITK docs). An N4_ENABLED toggle is provided so
    datasets like BraTS that already had N4 can skip it entirely.
-4. **Fixed file scanning bug**: Now supports both `.nii` and `.nii.gz`, and
-   correctly distinguishes `_t1` from `_t1ce`.
+4. **Fixed file scanning bug**: Now supports both .nii and .nii.gz, and
+   correctly distinguishes _t1 from _t1ce.
 5. **Lightweight label statistics**: The original loaded all 4 MRI volumes
    just to print label distributions. The new version only loads the seg
    file + nearest-neighbor resample + bincount, ~5x faster.
 6. **Removed unnecessary GPU calls**: Lightweight ops like z-score are faster
-   on CPU, avoiding redundant host ↔ device transfers.
-7. **Multi-process parallel preprocessing**: Uses `ProcessPoolExecutor` to
+   on CPU, avoiding redundant host <-> device transfers.
+7. **Multi-process parallel preprocessing**: Uses ProcessPoolExecutor to
    fully utilize multi-core CPUs.
 8. **Configurable data root**: Override the default path via the environment
-   variable `BRAIN_MRI_ROOT`, making it easy to use across machines.
+   variable BRAIN_MRI_ROOT, making it easy to use across machines.
 
 Usage:
     # One-time offline preprocessing (run this first)
-    python new_data_load.py preprocess --workers 8
+    python data_load.py preprocess --workers 8
 
     # Print dataset statistics (reads from cache if available)
-    python new_data_load.py info
+    python data_load.py info
 
     # In training code:
-    from new_data_load import BrainMRIDataset
+    from data_load import BrainMRIDataset
     ds = BrainMRIDataset(split='train', use_cache=True)
 """
 
@@ -179,9 +179,7 @@ def resample_to_isotropic(
 
     # Labels must use nearest-neighbor; MRI uses cubic spline
     order = 0 if is_label else 3
-    dtype = np.float32 if not is_label else np.float32  # float first, then round
-
-    data = np.asarray(img.dataobj, dtype=dtype)
+    data = np.asarray(img.dataobj, dtype=np.float32)
 
     # Skip zoom if spacing is already close to target (saves time)
     if np.allclose(zoom_factors, 1.0, atol=1e-3):
