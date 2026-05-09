@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     # -- Model --
     group_model = parser.add_argument_group("Model")
     group_model.add_argument(
-        "--model_name", type=str, default="nnunet",
+        "--model_name", type=str, default="uk_an",
         choices=["nnunet", "attention_unet", "transunet", "uk_an"],
         help="Model architecture",
     )

@@ -26,7 +26,10 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
+try:
+    from torch.amp import GradScaler, autocast
+except ImportError:
+    from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 
 # Project imports
