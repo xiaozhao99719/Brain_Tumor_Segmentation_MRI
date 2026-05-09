@@ -54,7 +54,7 @@ def build_parser() -> argparse.ArgumentParser:
     group_model = parser.add_argument_group("Model")
     group_model.add_argument(
         "--model_name", type=str, default="nnunet",
-        choices=["nnunet", "attention_unet", "transunet"],
+        choices=["nnunet", "attention_unet", "transunet", "uk_an"],
         help="Model architecture",
     )
     group_model.add_argument(
@@ -97,6 +97,15 @@ def build_parser() -> argparse.ArgumentParser:
     group_model.add_argument(
         "--vit_dropout", type=float, default=0.1,
         help="TransUNet ViT dropout rate",
+    )
+    # U-KAN-specific
+    group_model.add_argument(
+        "--uk_an_grid_size", type=int, default=5,
+        help="U-KAN B-spline grid size (number of intervals)",
+    )
+    group_model.add_argument(
+        "--uk_an_spline_order", type=int, default=3,
+        help="U-KAN B-spline polynomial order (3=cubic)",
     )
 
     # -- Training --

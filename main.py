@@ -17,6 +17,12 @@ Usage examples:
     # Testing only
     python main.py --mode test --model_name transunet
 
+    # U-KAN (Kolmogorov-Arnold Network) -- recommended for MRI segmentation
+    python main.py --mode all --model_name uk_an --epochs 300 --batch_size 2
+
+    # U-KAN with custom B-spline settings
+    python main.py --mode train --model_name uk_an --uk_an_grid_size 8 --uk_an_spline_order 3
+
     # Preprocessing only
     python main.py --mode preprocess --preprocess_workers 8
 
