@@ -148,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="DataLoader num_workers",
     )
     group_train.add_argument(
-        "--pin_memory", type=int, default=1, choices=[0, 1],
+        "--pin_memory", type=int, default=0, choices=[0, 1],
         help="DataLoader pin_memory",
     )
     group_train.add_argument(

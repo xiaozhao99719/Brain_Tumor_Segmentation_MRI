@@ -665,6 +665,8 @@ def train(args=None) -> nn.Module:
         best_dice = ckpt.get("best_dice", 0.0)
         if scheduler and "scheduler_state_dict" in ckpt:
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if scaler and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
 
     # -- Training loop --
     print("\n" + "=" * 70)
@@ -732,6 +734,8 @@ def train(args=None) -> nn.Module:
                 "best_dice": best_dice,
                 "val_metrics": val_metrics,
                 "args": vars(args),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                "scaler_state_dict": scaler.state_dict() if scaler else None,
             }, ckpt_path)
 
             if ema is not None:

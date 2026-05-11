@@ -178,14 +178,33 @@ def test(args=None) -> Dict[str, float]:
     print("  Starting test evaluation")
     print("=" * 70)
 
+    # Resume state file
+    resume_file = os.path.join(ckpt_dir, "test_resume_state.json")
     all_metrics: Dict[str, float] = {}
     n_samples = 0
+    tested_ids: List[str] = []  # 已测试的 patient_id 列表
+
+    # 加载续测状态
+    if os.path.isfile(resume_file):
+        import json
+        with open(resume_file, "r") as f:
+            resume_state = json.load(f)
+        all_metrics = resume_state.get("all_metrics", {})
+        n_samples = resume_state.get("n_samples", 0)
+        tested_ids = resume_state.get("tested_ids", [])
+        print(f"  Resuming from previous test: {len(tested_ids)} samples already tested")
 
     pred_dir = os.path.join(args.output_dir, args.model_name, "predictions")
     if args.save_pred:
         os.makedirs(pred_dir, exist_ok=True)
 
     for idx, (volume, seg, info) in enumerate(test_loader):
+        patient_id = info["patient_id"][0] if isinstance(info["patient_id"], (list, tuple)) else info["patient_id"]
+
+        # 跳过已测试的样本
+        if patient_id in tested_ids:
+            continue
+
         volume = volume.to(device, non_blocking=True)
         seg = seg.to(device, non_blocking=True)
 
@@ -207,11 +226,11 @@ def test(args=None) -> Dict[str, float]:
         for k, v in metrics.items():
             all_metrics[k] = all_metrics.get(k, 0.0) + v
         n_samples += 1
+        tested_ids.append(patient_id)
 
         # Print per-sample result
-        patient_id = info["patient_id"][0] if isinstance(info["patient_id"], (list, tuple)) else info["patient_id"]
         print(
-            f"  [{idx+1}/{len(test_ds)}] {patient_id}: "
+            f"  [{n_samples}/{len(test_ds)}] {patient_id}: "
             f"Dice={metrics['dice_mean']:.4f}  "
             f"IoU={metrics['iou_mean']:.4f}  "
             f"Sens={metrics['sens_mean']:.4f}"
@@ -220,6 +239,19 @@ def test(args=None) -> Dict[str, float]:
         # Save prediction NIfTI
         if args.save_pred:
             _save_prediction_nifti(prob_map, info, pred_dir)
+
+        # 保存续测状态（每测完一个样本就保存）
+        import json
+        with open(resume_file, "w") as f:
+            json.dump({
+                "all_metrics": all_metrics,
+                "n_samples": n_samples,
+                "tested_ids": tested_ids,
+            }, f)
+
+    # 删除续测状态文件（测试完成）
+    if os.path.isfile(resume_file):
+        os.remove(resume_file)
 
     # -- Average metrics --
     avg_metrics = {k: v / n_samples for k, v in all_metrics.items()}
